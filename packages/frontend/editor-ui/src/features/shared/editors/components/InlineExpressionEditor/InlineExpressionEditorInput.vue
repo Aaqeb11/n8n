@@ -9,7 +9,7 @@ import { mappingDropCursor } from '../../plugins/codemirror/dragAndDrop';
 import { editorKeymap } from '../../plugins/codemirror/keymap';
 import { n8nAutocompletion, n8nLang } from '../../plugins/codemirror/n8nLang';
 import { infoBoxTooltips } from '../../plugins/codemirror/tooltips/InfoBoxTooltip';
-import type { Segment } from '@/types/expressions';
+import type { Segment } from '@/app/types/expressions';
 import type { IDataObject } from 'n8n-workflow';
 import { inputTheme } from './theme';
 import { onKeyStroke } from '@vueuse/core';
@@ -75,6 +75,7 @@ const {
 	isReadOnly: computed(() => props.isReadOnly),
 	autocompleteTelemetry: { enabled: true, parameterPath: props.path },
 	additionalData: props.additionalData,
+	initialCursorPosition: 'lastExpression',
 });
 
 watch(segments.display, (newSegments) => {
@@ -102,8 +103,10 @@ defineExpose({
 	setCursorPosition,
 	focus: () => {
 		if (!hasFocus.value) {
-			setCursorPosition('lastExpression');
 			focus();
+			requestAnimationFrame(() => {
+				setCursorPosition('lastExpression');
+			});
 		}
 	},
 	selectAll: () => {

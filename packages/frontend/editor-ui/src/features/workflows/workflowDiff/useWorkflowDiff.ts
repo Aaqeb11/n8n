@@ -1,75 +1,37 @@
-import _pick from 'lodash-es/pick';
-import _isEqual from 'lodash-es/isEqual';
 import type { CanvasConnection, CanvasNode } from '@/features/workflows/canvas/canvas.types';
 import type { INodeUi, IWorkflowDb } from '@/Interface';
-import type { MaybeRefOrGetter, Ref, ComputedRef } from 'vue';
-import { useWorkflowsStore } from '@/stores/workflows.store';
-import { toValue, computed, ref, watchEffect, shallowRef } from 'vue';
+import {
+	toValue,
+	computed,
+	ref,
+	watchEffect,
+	shallowRef,
+	onScopeDispose,
+	effectScope,
+	type MaybeRefOrGetter,
+	type Ref,
+	type ComputedRef,
+	type EffectScope,
+} from 'vue';
 import { useCanvasMapping } from '@/features/workflows/canvas/composables/useCanvasMapping';
-import type { Workflow, IConnections, INodeTypeDescription } from 'n8n-workflow';
-import { useNodeTypesStore } from '@/stores/nodeTypes.store';
-
-export const enum NodeDiffStatus {
-	Eq = 'equal',
-	Modified = 'modified',
-	Added = 'added',
-	Deleted = 'deleted',
-}
-
-export type NodeDiff<T> = {
-	status: NodeDiffStatus;
-	node: T;
-};
-
-export type WorkflowDiff<T> = Map<string, NodeDiff<T>>;
-
-export function compareNodes<T extends { id: string }>(
-	base: T | undefined,
-	target: T | undefined,
-): boolean {
-	const propsToCompare = ['name', 'type', 'typeVersion', 'webhookId', 'credentials', 'parameters'];
-
-	const baseNode = _pick(base, propsToCompare);
-	const targetNode = _pick(target, propsToCompare);
-
-	return _isEqual(baseNode, targetNode);
-}
-
-export function compareWorkflowsNodes<T extends { id: string }>(
-	base: T[],
-	target: T[],
-	nodesEqual: (base: T | undefined, target: T | undefined) => boolean = compareNodes,
-): WorkflowDiff<T> {
-	const baseNodes = base.reduce<Map<string, T>>((acc, node) => {
-		acc.set(node.id, node);
-		return acc;
-	}, new Map());
-
-	const targetNodes = target.reduce<Map<string, T>>((acc, node) => {
-		acc.set(node.id, node);
-		return acc;
-	}, new Map());
-
-	const diff: WorkflowDiff<T> = new Map();
-
-	for (const [id, node] of baseNodes.entries()) {
-		if (!targetNodes.has(id)) {
-			diff.set(id, { status: NodeDiffStatus.Deleted, node });
-		} else if (!nodesEqual(baseNodes.get(id), targetNodes.get(id))) {
-			diff.set(id, { status: NodeDiffStatus.Modified, node });
-		} else {
-			diff.set(id, { status: NodeDiffStatus.Eq, node });
-		}
-	}
-
-	for (const [id, node] of targetNodes.entries()) {
-		if (!baseNodes.has(id)) {
-			diff.set(id, { status: NodeDiffStatus.Added, node });
-		}
-	}
-
-	return diff;
-}
+import type { IConnections, INodeTypeDescription, NodeDiff } from 'n8n-workflow';
+import { compareWorkflowsNodes, NodeDiffStatus } from 'n8n-workflow';
+import { useNodeTypesStore } from '@/app/stores/nodeTypes.store';
+import {
+	useWorkflowDocumentStore,
+	createWorkflowDocumentId,
+	disposeWorkflowDocumentStore,
+	type WorkflowDocumentId,
+} from '@/app/stores/workflowDocument.store';
+import {
+	useWorkflowExecutionStateStore,
+	disposeWorkflowExecutionStateStore,
+} from '@/app/stores/workflowExecutionState.store';
+import { useWorkflowDocumentRenderData } from '@/app/stores/workflowDocument/useWorkflowDocumentRenderData';
+import {
+	createEmptyCanvasRenderData,
+	type CanvasRenderData,
+} from '@/features/workflows/canvas/canvas.utils';
 
 export function mapConnections(connections: CanvasConnection[]) {
 	return connections.reduce(
@@ -82,23 +44,24 @@ export function mapConnections(connections: CanvasConnection[]) {
 	);
 }
 
-function createWorkflowRefs(
-	workflow: MaybeRefOrGetter<IWorkflowDb | undefined>,
-	createWorkflowObject: (nodes: INodeUi[], connections: IConnections) => Workflow,
-) {
+function createWorkflowRefs(workflow: MaybeRefOrGetter<IWorkflowDb | undefined>) {
 	const workflowRef = computed(() => toValue(workflow));
 	const workflowNodes = ref<INodeUi[]>([]);
 	const workflowConnections = ref<IConnections>({});
-	const workflowObjectRef = shallowRef<Workflow>(createWorkflowObject([], {}));
 
 	watchEffect(() => {
 		const workflowValue = workflowRef.value;
 		if (workflowValue) {
-			workflowObjectRef.value = createWorkflowObject(
-				workflowValue.nodes,
-				workflowValue.connections,
-			);
-			workflowNodes.value = workflowValue.nodes;
+			// Ensure all nodes have IDs before passing to canvas mapping
+			// External sources (like postMessage) may provide nodes without IDs
+			const nodesWithIds = workflowValue.nodes.map((node) => {
+				if (!node.id) {
+					return { ...node, id: window.crypto.randomUUID() };
+				}
+				return node;
+			});
+
+			workflowNodes.value = nodesWithIds;
 			workflowConnections.value = workflowValue.connections;
 		}
 	});
@@ -107,7 +70,6 @@ function createWorkflowRefs(
 		workflowRef,
 		workflowNodes,
 		workflowConnections,
-		workflowObjectRef,
 	};
 }
 
@@ -115,9 +77,15 @@ function createWorkflowDiff(
 	workflowRef: ComputedRef<IWorkflowDb | undefined>,
 	workflowNodes: Ref<INodeUi[]>,
 	workflowConnections: Ref<IConnections>,
-	workflowObjectRef: Ref<Workflow>,
+	renderData: Ref<CanvasRenderData>,
 ) {
-	return computed(() => {
+	const { nodes, connections } = useCanvasMapping({
+		nodes: workflowNodes,
+		connections: workflowConnections,
+		renderData,
+	});
+
+	const canvasData = computed(() => {
 		if (!workflowRef.value) {
 			return {
 				workflow: undefined,
@@ -125,12 +93,6 @@ function createWorkflowDiff(
 				connections: [],
 			};
 		}
-
-		const { nodes, connections } = useCanvasMapping({
-			nodes: workflowNodes,
-			connections: workflowConnections,
-			workflowObject: workflowObjectRef,
-		});
 
 		return {
 			workflow: workflowRef,
@@ -149,36 +111,119 @@ function createWorkflowDiff(
 			}),
 		};
 	});
+
+	return {
+		canvasData,
+		// Return workflowNodes ref so diff logic can use nodes with generated IDs
+		workflowNodes,
+	};
+}
+
+function createDiffRenderData(
+	workflowRef: ComputedRef<IWorkflowDb | undefined>,
+	workflowNodes: Ref<INodeUi[]>,
+	side: string,
+) {
+	const renderData = shallowRef<CanvasRenderData>(createEmptyCanvasRenderData());
+	let workflowDocumentStore: ReturnType<typeof useWorkflowDocumentStore> | null = null;
+	// Document id of the stores this side currently owns.
+	let currentDocumentId: WorkflowDocumentId | null = null;
+	// `useWorkflowDocumentRenderData` is side-effectful; own its scope so it can
+	// be torn down when the diffed workflow changes or this side disposes.
+	let renderDataScope: EffectScope | undefined;
+
+	function disposeStores() {
+		renderDataScope?.stop();
+		renderDataScope = undefined;
+		if (currentDocumentId) {
+			// Render data created an execution-state store keyed by this document id;
+			// dispose it with the document store so neither outlives the diff side.
+			disposeWorkflowExecutionStateStore(useWorkflowExecutionStateStore(currentDocumentId));
+			currentDocumentId = null;
+		}
+		if (workflowDocumentStore) {
+			disposeWorkflowDocumentStore(workflowDocumentStore);
+			workflowDocumentStore = null;
+		}
+	}
+
+	watchEffect(() => {
+		const wf = workflowRef.value;
+		if (!wf?.id) return;
+
+		disposeStores();
+
+		const versionId = wf.versionId ?? `diff-${side}`;
+		const docId = createWorkflowDocumentId(wf.id, versionId);
+
+		workflowDocumentStore = useWorkflowDocumentStore(docId);
+		// Hydrate from the same normalized nodes that feed the canvas so the
+		// render-data maps are keyed by the same node IDs the canvas looks up.
+		// Shallow-copy the nodes so the document store owns/mutates its own node
+		// objects (e.g. position snapping) without leaking into `workflowNodes`.
+		workflowDocumentStore.hydrate({
+			...wf,
+			nodes: workflowNodes.value.map((node) => ({ ...node })),
+			versionId,
+		} as IWorkflowDb);
+		currentDocumentId = docId;
+		renderDataScope = effectScope(true);
+		renderDataScope.run(() => {
+			renderData.value = useWorkflowDocumentRenderData(docId);
+		});
+	});
+
+	return { renderData, dispose: disposeStores };
 }
 
 export const useWorkflowDiff = (
 	sourceWorkflow: MaybeRefOrGetter<IWorkflowDb | undefined>,
 	targetWorkflow: MaybeRefOrGetter<IWorkflowDb | undefined>,
 ) => {
-	const workflowsStore = useWorkflowsStore();
 	const nodeTypesStore = useNodeTypesStore();
 
-	const sourceRefs = createWorkflowRefs(sourceWorkflow, workflowsStore.createWorkflowObject);
-	const targetRefs = createWorkflowRefs(targetWorkflow, workflowsStore.createWorkflowObject);
+	const sourceRefs = createWorkflowRefs(sourceWorkflow);
+	const targetRefs = createWorkflowRefs(targetWorkflow);
 
-	const source = createWorkflowDiff(
+	const { renderData: sourceRenderData, dispose: disposeSource } = createDiffRenderData(
+		sourceRefs.workflowRef,
+		sourceRefs.workflowNodes,
+		'source',
+	);
+	const { renderData: targetRenderData, dispose: disposeTarget } = createDiffRenderData(
+		targetRefs.workflowRef,
+		targetRefs.workflowNodes,
+		'target',
+	);
+
+	const sourceDiff = createWorkflowDiff(
 		sourceRefs.workflowRef,
 		sourceRefs.workflowNodes,
 		sourceRefs.workflowConnections,
-		sourceRefs.workflowObjectRef,
+		sourceRenderData,
 	);
 
-	const target = createWorkflowDiff(
+	const targetDiff = createWorkflowDiff(
 		targetRefs.workflowRef,
 		targetRefs.workflowNodes,
 		targetRefs.workflowConnections,
-		targetRefs.workflowObjectRef,
+		targetRenderData,
 	);
 
+	onScopeDispose(() => {
+		disposeSource();
+		disposeTarget();
+	});
+
+	// Expose canvas data as source/target for backwards compatibility
+	const source = sourceDiff.canvasData;
+	const target = targetDiff.canvasData;
+
 	const nodesDiff = computed(() => {
-		// Handle case where one or both workflows don't exist
-		const sourceNodes = source.value?.workflow?.value?.nodes ?? [];
-		const targetNodes = target.value?.workflow?.value?.nodes ?? [];
+		// Use workflowNodes refs which have generated IDs for nodes without IDs
+		// This ensures consistency between canvas mapping and diff logic
+		const sourceNodes = sourceDiff.workflowNodes.value;
+		const targetNodes = targetDiff.workflowNodes.value;
 
 		// If neither workflow exists, return empty diff
 		if (sourceNodes.length === 0 && targetNodes.length === 0) {
@@ -253,6 +298,8 @@ export const useWorkflowDiff = (
 	return {
 		source,
 		target,
+		sourceRenderData,
+		targetRenderData,
 		nodesDiff,
 		connectionsDiff,
 	};

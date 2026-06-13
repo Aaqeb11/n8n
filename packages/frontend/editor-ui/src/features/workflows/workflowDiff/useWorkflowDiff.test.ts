@@ -1,33 +1,58 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ref, computed } from 'vue';
-import {
-	NodeDiffStatus,
-	compareNodes,
-	compareWorkflowsNodes,
-	mapConnections,
-	useWorkflowDiff,
-} from './useWorkflowDiff';
-import type {
-	CanvasConnection,
-	CanvasNode,
-	ExecutionOutputMap,
-} from '@/features/workflows/canvas/canvas.types';
+import { ref, computed, effectScope, nextTick } from 'vue';
+import { mapConnections, useWorkflowDiff } from './useWorkflowDiff';
+import type { CanvasConnection, CanvasNode } from '@/features/workflows/canvas/canvas.types';
+import type { ExecutionOutputMap } from '@/app/types/executionData';
 import type { INodeUi, IWorkflowDb } from '@/Interface';
-import type { IConnections } from 'n8n-workflow';
+import { NodeDiffStatus, type IConnections } from 'n8n-workflow';
 import { useCanvasMapping } from '@/features/workflows/canvas/composables/useCanvasMapping';
+import { disposeWorkflowDocumentStore } from '@/app/stores/workflowDocument.store';
+import { disposeWorkflowExecutionStateStore } from '@/app/stores/workflowExecutionState.store';
 
 // Mock modules at top level
-vi.mock('@/stores/workflows.store', () => ({
+vi.mock('@/app/stores/workflows.store', () => ({
 	useWorkflowsStore: () => ({
-		createWorkflowObject: vi.fn().mockReturnValue({
-			id: 'test-workflow',
-			nodes: [],
-			connections: {},
-		}),
+		workflowId: 'test-workflow',
 	}),
 }));
 
-vi.mock('@/stores/nodeTypes.store', () => ({
+const mockDocumentStore = vi.hoisted(() => ({
+	hydrate: vi.fn(),
+	render: {
+		nodeInputsByNodeId: new Map(),
+		nodeOutputsByNodeId: new Map(),
+		pinnedDataByNodeName: {},
+		executionIssuesByNodeName: new Map(),
+	},
+	$id: 'test-store',
+	$dispose: vi.fn(),
+}));
+vi.mock('@/app/stores/workflowDocument.store', () => ({
+	useWorkflowDocumentStore: () => mockDocumentStore,
+	createWorkflowDocumentId: vi.fn(
+		(workflowId: string, version: string = 'latest') => `${workflowId}@${version}`,
+	),
+	disposeWorkflowDocumentStore: vi.fn(),
+}));
+
+vi.mock('@/app/stores/workflowDocument/useWorkflowDocumentRenderData', async () => {
+	const { createEmptyCanvasRenderData } = await vi.importActual<
+		typeof import('@/features/workflows/canvas/canvas.utils')
+	>('@/features/workflows/canvas/canvas.utils');
+	return {
+		useWorkflowDocumentRenderData: vi.fn(() => createEmptyCanvasRenderData()),
+	};
+});
+
+vi.mock('@/app/stores/workflowExecutionState.store', () => ({
+	useWorkflowExecutionStateStore: vi.fn((id: string) => ({
+		$id: id,
+		activeExecutionIssuesByNodeName: new Map(),
+	})),
+	disposeWorkflowExecutionStateStore: vi.fn(),
+}));
+
+vi.mock('@/app/stores/nodeTypes.store', () => ({
 	useNodeTypesStore: () => ({
 		getNodeType: vi.fn().mockReturnValue({
 			name: 'Test Node Type',
@@ -42,274 +67,13 @@ vi.mock('@/features/workflows/canvas/composables/useCanvasMapping', () => ({
 		nodeExecutionRunDataOutputMapById: computed(() => ({})),
 		nodeExecutionWaitingForNextById: computed(() => ({})),
 		nodeHasIssuesById: computed(() => ({})),
+		nodeDisplaySizeById: computed(() => ({})),
 		nodes: computed(() => []),
 		connections: computed(() => []),
 	}),
 }));
 
 describe('useWorkflowDiff', () => {
-	describe('NodeDiffStatus', () => {
-		it('should have correct enum values', () => {
-			expect(NodeDiffStatus.Eq).toBe('equal');
-			expect(NodeDiffStatus.Modified).toBe('modified');
-			expect(NodeDiffStatus.Added).toBe('added');
-			expect(NodeDiffStatus.Deleted).toBe('deleted');
-		});
-	});
-
-	describe('compareNodes', () => {
-		const createTestNode = (overrides: Partial<TestNode> = {}): TestNode => ({
-			id: 'test-node-1',
-			name: 'Test Node',
-			type: 'test-type',
-			typeVersion: 1,
-			webhookId: 'webhook-123',
-			credentials: { test: 'credential' },
-			parameters: { param1: 'value1' },
-			position: [100, 200],
-			disabled: false,
-			...overrides,
-		});
-
-		type TestNode = {
-			id: string;
-			name: string;
-			type: string;
-			typeVersion: number;
-			webhookId: string;
-			credentials: Record<string, unknown>;
-			parameters: Record<string, unknown>;
-			position: [number, number];
-			disabled: boolean;
-		};
-
-		it('should return true for identical nodes', () => {
-			const node1 = createTestNode();
-			const node2 = createTestNode();
-
-			const result = compareNodes(node1, node2);
-
-			expect(result).toBe(true);
-		});
-
-		it('should return false when nodes have different names', () => {
-			const node1 = createTestNode({ name: 'Node 1' });
-			const node2 = createTestNode({ name: 'Node 2' });
-
-			const result = compareNodes(node1, node2);
-
-			expect(result).toBe(false);
-		});
-
-		it('should return false when nodes have different types', () => {
-			const node1 = createTestNode({ type: 'type1' });
-			const node2 = createTestNode({ type: 'type2' });
-
-			const result = compareNodes(node1, node2);
-
-			expect(result).toBe(false);
-		});
-
-		it('should return false when nodes have different typeVersions', () => {
-			const node1 = createTestNode({ typeVersion: 1 });
-			const node2 = createTestNode({ typeVersion: 2 });
-
-			const result = compareNodes(node1, node2);
-
-			expect(result).toBe(false);
-		});
-
-		it('should return false when nodes have different webhookIds', () => {
-			const node1 = createTestNode({ webhookId: 'webhook1' });
-			const node2 = createTestNode({ webhookId: 'webhook2' });
-
-			const result = compareNodes(node1, node2);
-
-			expect(result).toBe(false);
-		});
-
-		it('should return false when nodes have different credentials', () => {
-			const node1 = createTestNode({ credentials: { test: 'cred1' } });
-			const node2 = createTestNode({ credentials: { test: 'cred2' } });
-
-			const result = compareNodes(node1, node2);
-
-			expect(result).toBe(false);
-		});
-
-		it('should return false when nodes have different parameters', () => {
-			const node1 = createTestNode({ parameters: { param1: 'value1' } });
-			const node2 = createTestNode({ parameters: { param1: 'value2' } });
-
-			const result = compareNodes(node1, node2);
-
-			expect(result).toBe(false);
-		});
-
-		it('should ignore properties not in comparison list', () => {
-			const node1 = createTestNode({ position: [100, 200], disabled: false });
-			const node2 = createTestNode({ position: [300, 400], disabled: true });
-
-			const result = compareNodes(node1, node2);
-
-			expect(result).toBe(true);
-		});
-
-		it('should handle undefined base node', () => {
-			const node2 = createTestNode();
-
-			const result = compareNodes(undefined, node2);
-
-			expect(result).toBe(false);
-		});
-
-		it('should handle undefined target node', () => {
-			const node1 = createTestNode();
-
-			const result = compareNodes(node1, undefined);
-
-			expect(result).toBe(false);
-		});
-
-		it('should handle both nodes being undefined', () => {
-			const result = compareNodes(undefined, undefined);
-
-			expect(result).toBe(true);
-		});
-	});
-
-	describe('compareWorkflowsNodes', () => {
-		const createTestNode = (id: string, overrides: Partial<TestNode> = {}): TestNode => ({
-			id,
-			name: `Node ${id}`,
-			type: 'test-type',
-			typeVersion: 1,
-			webhookId: `webhook-${id}`,
-			credentials: {},
-			parameters: {},
-			...overrides,
-		});
-
-		type TestNode = {
-			id: string;
-			name: string;
-			type: string;
-			typeVersion: number;
-			webhookId: string;
-			credentials: Record<string, unknown>;
-			parameters: Record<string, unknown>;
-		};
-
-		it('should detect equal nodes', () => {
-			const baseNodes = [createTestNode('1'), createTestNode('2')];
-			const targetNodes = [createTestNode('1'), createTestNode('2')];
-
-			const diff = compareWorkflowsNodes(baseNodes, targetNodes);
-
-			expect(diff.size).toBe(2);
-			expect(diff.get('1')?.status).toBe(NodeDiffStatus.Eq);
-			expect(diff.get('2')?.status).toBe(NodeDiffStatus.Eq);
-		});
-
-		it('should detect modified nodes', () => {
-			const baseNodes = [createTestNode('1', { name: 'Original Name' })];
-			const targetNodes = [createTestNode('1', { name: 'Modified Name' })];
-
-			const diff = compareWorkflowsNodes(baseNodes, targetNodes);
-
-			expect(diff.size).toBe(1);
-			expect(diff.get('1')?.status).toBe(NodeDiffStatus.Modified);
-			expect(diff.get('1')?.node).toEqual(baseNodes[0]);
-		});
-
-		it('should detect added nodes', () => {
-			const baseNodes = [createTestNode('1')];
-			const targetNodes = [createTestNode('1'), createTestNode('2')];
-
-			const diff = compareWorkflowsNodes(baseNodes, targetNodes);
-
-			expect(diff.size).toBe(2);
-			expect(diff.get('1')?.status).toBe(NodeDiffStatus.Eq);
-			expect(diff.get('2')?.status).toBe(NodeDiffStatus.Added);
-			expect(diff.get('2')?.node).toEqual(targetNodes[1]);
-		});
-
-		it('should detect deleted nodes', () => {
-			const baseNodes = [createTestNode('1'), createTestNode('2')];
-			const targetNodes = [createTestNode('1')];
-
-			const diff = compareWorkflowsNodes(baseNodes, targetNodes);
-
-			expect(diff.size).toBe(2);
-			expect(diff.get('1')?.status).toBe(NodeDiffStatus.Eq);
-			expect(diff.get('2')?.status).toBe(NodeDiffStatus.Deleted);
-			expect(diff.get('2')?.node).toEqual(baseNodes[1]);
-		});
-
-		it('should handle empty base array', () => {
-			const baseNodes: TestNode[] = [];
-			const targetNodes = [createTestNode('1'), createTestNode('2')];
-
-			const diff = compareWorkflowsNodes(baseNodes, targetNodes);
-
-			expect(diff.size).toBe(2);
-			expect(diff.get('1')?.status).toBe(NodeDiffStatus.Added);
-			expect(diff.get('2')?.status).toBe(NodeDiffStatus.Added);
-		});
-
-		it('should handle empty target array', () => {
-			const baseNodes = [createTestNode('1'), createTestNode('2')];
-			const targetNodes: TestNode[] = [];
-
-			const diff = compareWorkflowsNodes(baseNodes, targetNodes);
-
-			expect(diff.size).toBe(2);
-			expect(diff.get('1')?.status).toBe(NodeDiffStatus.Deleted);
-			expect(diff.get('2')?.status).toBe(NodeDiffStatus.Deleted);
-		});
-
-		it('should handle both arrays being empty', () => {
-			const baseNodes: TestNode[] = [];
-			const targetNodes: TestNode[] = [];
-
-			const diff = compareWorkflowsNodes(baseNodes, targetNodes);
-
-			expect(diff.size).toBe(0);
-		});
-
-		it('should use custom comparison function when provided', () => {
-			const baseNodes = [createTestNode('1', { name: 'Original' })];
-			const targetNodes = [createTestNode('1', { name: 'Modified' })];
-
-			const customCompare = vi.fn().mockReturnValue(true);
-			const diff = compareWorkflowsNodes(baseNodes, targetNodes, customCompare);
-
-			expect(customCompare).toHaveBeenCalledWith(baseNodes[0], targetNodes[0]);
-			expect(diff.get('1')?.status).toBe(NodeDiffStatus.Eq);
-		});
-
-		it('should handle complex workflow comparison', () => {
-			const baseNodes = [
-				createTestNode('1', { name: 'Node 1' }),
-				createTestNode('2', { name: 'Node 2' }),
-				createTestNode('3', { name: 'Node 3' }),
-			];
-			const targetNodes = [
-				createTestNode('1', { name: 'Node 1' }), // Equal
-				createTestNode('2', { name: 'Node 2 Modified' }), // Modified
-				createTestNode('4', { name: 'Node 4' }), // Added
-			];
-
-			const diff = compareWorkflowsNodes(baseNodes, targetNodes);
-
-			expect(diff.size).toBe(4);
-			expect(diff.get('1')?.status).toBe(NodeDiffStatus.Eq);
-			expect(diff.get('2')?.status).toBe(NodeDiffStatus.Modified);
-			expect(diff.get('3')?.status).toBe(NodeDiffStatus.Deleted);
-			expect(diff.get('4')?.status).toBe(NodeDiffStatus.Added);
-		});
-	});
-
 	describe('mapConnections', () => {
 		const createTestConnection = (
 			id: string,
@@ -405,6 +169,9 @@ describe('useWorkflowDiff', () => {
 			nodeExecutionRunDataOutputMapById: computed(() => ({}) as Record<string, ExecutionOutputMap>),
 			nodeExecutionWaitingForNextById: computed(() => ({}) as Record<string, boolean>),
 			nodeHasIssuesById: computed(() => ({}) as Record<string, boolean>),
+			nodeDisplaySizeById: computed(
+				() => ({}) as Record<string, { width: number; height: number }>,
+			),
 			nodes: computed(() => nodes as CanvasNode[]),
 			connections: computed(() => connections as CanvasConnection[]),
 		});
@@ -424,6 +191,7 @@ describe('useWorkflowDiff', () => {
 			nodes,
 			connections,
 			active: false,
+			activeVersionId: null,
 			createdAt: '2023-01-01T00:00:00.000Z',
 			updatedAt: '2023-01-01T00:00:00.000Z',
 			tags: [],
@@ -635,6 +403,115 @@ describe('useWorkflowDiff', () => {
 			expect(connectionDiff?.status).toBe(NodeDiffStatus.Added);
 			expect(connectionDiff?.connection).toBeDefined();
 			expect(connectionDiff?.connection.id).toBe('conn1');
+		});
+
+		it('should generate IDs for nodes that are missing them', () => {
+			const nodeWithoutId = {
+				name: 'Node Without ID',
+				type: 'test-node',
+				typeVersion: 1,
+				position: [100, 100] as [number, number],
+				parameters: {},
+			} as INodeUi;
+
+			const nodeWithId = createMockNode('existing-id');
+
+			const sourceWorkflow = createMockWorkflow('source', [nodeWithoutId, nodeWithId]);
+
+			useWorkflowDiff(sourceWorkflow, undefined);
+
+			// Verify useCanvasMapping was called with nodes that have IDs
+			const firstCall = mockUseCanvasMapping.mock.calls[0][0];
+			const passedNodes = firstCall.nodes.value;
+
+			expect(passedNodes).toHaveLength(2);
+			// Node without ID should now have a generated UUID
+			expect(passedNodes[0].id).toBeDefined();
+			expect(passedNodes[0].id).toMatch(
+				/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+			);
+			expect(passedNodes[0].name).toBe('Node Without ID');
+			// Node with existing ID should keep its ID
+			expect(passedNodes[1].id).toBe('existing-id');
+		});
+
+		it('hydrates the render-data store with the same node IDs used for canvas mapping', () => {
+			const nodeWithoutId = {
+				name: 'Node Without ID',
+				type: 'test-node',
+				typeVersion: 1,
+				position: [100, 100] as [number, number],
+				parameters: {},
+			} as INodeUi;
+
+			const sourceWorkflow = createMockWorkflow('source', [nodeWithoutId]);
+
+			useWorkflowDiff(sourceWorkflow, undefined);
+
+			// Canvas mapping receives nodes with generated IDs; the render-data store
+			// must be hydrated with those same IDs, otherwise canvas lookups
+			// (handles, render type, subtitle, status) miss.
+			const canvasNodes = mockUseCanvasMapping.mock.calls[0][0].nodes.value;
+			const hydratedNodes = mockDocumentStore.hydrate.mock.calls[0][0].nodes;
+
+			expect(canvasNodes[0].id).toBeDefined();
+			expect(hydratedNodes[0].id).toBe(canvasNodes[0].id);
+		});
+
+		it('disposes the execution-state store of the previous document when the diffed workflow changes', async () => {
+			const sourceWorkflowRef = ref<IWorkflowDb | undefined>(createMockWorkflow('source'));
+
+			useWorkflowDiff(sourceWorkflowRef, undefined);
+
+			expect(disposeWorkflowExecutionStateStore).not.toHaveBeenCalled();
+
+			sourceWorkflowRef.value = { ...createMockWorkflow('source'), versionId: 'version-2' };
+			await nextTick();
+
+			expect(disposeWorkflowExecutionStateStore).toHaveBeenCalledTimes(1);
+			expect(disposeWorkflowExecutionStateStore).toHaveBeenCalledWith(
+				expect.objectContaining({ $id: 'source@version-1' }),
+			);
+		});
+
+		it('disposes the execution-state stores of both sides on dispose', () => {
+			const scope = effectScope();
+			scope.run(() => {
+				useWorkflowDiff(createMockWorkflow('source'), createMockWorkflow('target'));
+			});
+
+			expect(disposeWorkflowExecutionStateStore).not.toHaveBeenCalled();
+
+			scope.stop();
+
+			expect(disposeWorkflowExecutionStateStore).toHaveBeenCalledTimes(2);
+			expect(disposeWorkflowExecutionStateStore).toHaveBeenCalledWith(
+				expect.objectContaining({ $id: 'source@version-1' }),
+			);
+			expect(disposeWorkflowExecutionStateStore).toHaveBeenCalledWith(
+				expect.objectContaining({ $id: 'target@version-1' }),
+			);
+			expect(disposeWorkflowDocumentStore).toHaveBeenCalledTimes(2);
+		});
+
+		it('disposes the execution-state store before recreating it when a versionless document id is reused', async () => {
+			const versionlessWorkflow = {
+				...createMockWorkflow('source'),
+				versionId: undefined,
+			} as unknown as IWorkflowDb;
+			const sourceWorkflowRef = ref<IWorkflowDb | undefined>(versionlessWorkflow);
+
+			useWorkflowDiff(sourceWorkflowRef, undefined);
+
+			sourceWorkflowRef.value = { ...versionlessWorkflow, name: 'Updated Workflow' };
+			await nextTick();
+
+			// Without a versionId both renders share the `source@diff-source` document id;
+			// the stale execution-state store must be disposed, not resurrected.
+			expect(disposeWorkflowExecutionStateStore).toHaveBeenCalledTimes(1);
+			expect(disposeWorkflowExecutionStateStore).toHaveBeenCalledWith(
+				expect.objectContaining({ $id: 'source@diff-source' }),
+			);
 		});
 	});
 });

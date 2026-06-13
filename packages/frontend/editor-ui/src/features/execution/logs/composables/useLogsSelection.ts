@@ -6,16 +6,16 @@ import {
 	getEntryAtRelativeIndex,
 	isSubNodeLog,
 } from '@/features/execution/logs/logs.utils';
-import { useTelemetry } from '@/composables/useTelemetry';
+import { useTelemetry } from '@/app/composables/useTelemetry';
 import { canvasEventBus } from '@/features/workflows/canvas/canvas.eventBus';
 import type { IExecutionResponse } from '@/features/execution/executions/executions.types';
-import { useCanvasStore } from '@/stores/canvas.store';
-import { useLogsStore } from '@/stores/logs.store';
-import { useUIStore } from '@/stores/ui.store';
+import { useCanvasStore } from '@/app/stores/canvas.store';
+import { useLogsStore } from '@/app/stores/logs.store';
+import { useUIStore } from '@/app/stores/ui.store';
 import { shallowRef, watch } from 'vue';
 import { computed } from 'vue';
 import type { Ref, ComputedRef } from 'vue';
-import { useWorkflowsStore } from '@/stores/workflows.store';
+import { injectWorkflowDocumentStore } from '@/app/stores/workflowDocument.store';
 
 export function useLogsSelection(
 	execution: ComputedRef<IExecutionResponse | undefined>,
@@ -33,7 +33,7 @@ export function useLogsSelection(
 	const logsStore = useLogsStore();
 	const uiStore = useUIStore();
 	const canvasStore = useCanvasStore();
-	const workflowsStore = useWorkflowsStore();
+	const workflowDocumentStore = injectWorkflowDocumentStore();
 
 	function syncSelectionToCanvasIfEnabled(value: LogEntry) {
 		if (!logsStore.isLogSelectionSyncedWithCanvas) {
@@ -105,7 +105,7 @@ export function useLogsSelection(
 		[() => uiStore.lastSelectedNode, () => logsStore.isLogSelectionSyncedWithCanvas],
 		([selectedOnCanvas, shouldSync]) => {
 			const selectedNodeId = selectedOnCanvas
-				? workflowsStore.nodesByName[selectedOnCanvas]?.id
+				? workflowDocumentStore.value.nodesByName[selectedOnCanvas]?.id
 				: undefined;
 
 			nodeIdToSelect.value =

@@ -7,7 +7,12 @@ import type {
 	INodeExecutionData,
 	INodeProperties,
 } from 'n8n-workflow';
-import { jsonParse, NodeOperationError, updateDisplayOptions } from 'n8n-workflow';
+import {
+	accumulateTokenUsage,
+	jsonParse,
+	NodeOperationError,
+	updateDisplayOptions,
+} from 'n8n-workflow';
 import { MODELS_NOT_SUPPORT_FUNCTION_CALLS } from '../../../helpers/constants';
 import type { ChatResponse } from '../../../helpers/interfaces';
 import { formatToOpenAIResponsesTool } from '../../../helpers/utils';
@@ -15,6 +20,17 @@ import { pollUntilAvailable } from '../../../helpers/polling';
 import { apiRequest } from '../../../transport';
 import { messageOptions, metadataProperty, modelRLC } from '../descriptions';
 import { createRequest } from './helpers/responses';
+
+const jsonSchemaExample = `{
+  "type": "object",
+  "properties": {
+    "message": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": ["message"]
+}`;
 
 const properties: INodeProperties[] = [
 	modelRLC('modelSearch'),
@@ -74,6 +90,8 @@ const properties: INodeProperties[] = [
 				options: [
 					{
 						displayName: 'Search Context Size',
+						description:
+							'High level guidance for the amount of context window space to use for the search',
 						name: 'searchContextSize',
 						type: 'options',
 						default: 'medium',
@@ -124,6 +142,8 @@ const properties: INodeProperties[] = [
 					{
 						displayName: 'Vector Store IDs',
 						name: 'vectorStoreIds',
+						description:
+							'The vector store IDs to use for the file search. Vector stores are managed via OpenAI Dashboard.',
 						type: 'json',
 						default: '[]',
 						required: true,
@@ -148,7 +168,7 @@ const properties: INodeProperties[] = [
 				name: 'codeInterpreter',
 				type: 'boolean',
 				default: true,
-				description: 'Whether to allow the model to execute code in a local environment',
+				description: 'Whether to allow the model to execute code in a sandboxed environment',
 			},
 		],
 	},
@@ -263,6 +283,8 @@ const properties: INodeProperties[] = [
 				displayName: 'Prompt',
 				name: 'promptConfig',
 				type: 'fixedCollection',
+				description:
+					'Configure the reusable prompt template configured via OpenAI Dashboard. <a href="https://platform.openai.com/docs/guides/prompt-engineering#reusable-prompts">Learn more</a>.',
 				default: { promptOptions: [{ promptId: '' }] },
 				options: [
 					{
@@ -384,10 +406,11 @@ const properties: INodeProperties[] = [
 								displayName: 'Type',
 								name: 'type',
 								type: 'options',
-								default: 'text',
+								default: '',
 								options: [
 									{ name: 'Text', value: 'text' },
-									{ name: 'JSON Schema(recommended)', value: 'json_schema' },
+									// eslint-disable-next-line n8n-nodes-base/node-param-display-name-miscased
+									{ name: 'JSON Schema (recommended)', value: 'json_schema' },
 									{ name: 'JSON Object', value: 'json_object' },
 								],
 							},
@@ -406,7 +429,7 @@ const properties: INodeProperties[] = [
 								displayName: 'Name',
 								name: 'name',
 								type: 'string',
-								default: '',
+								default: 'my_schema',
 								description:
 									'The name of the response format. Must be a-z, A-Z, 0-9, or contain underscores and dashes, with a maximum length of 64.',
 								displayOptions: {
@@ -416,10 +439,22 @@ const properties: INodeProperties[] = [
 								},
 							},
 							{
+								displayName:
+									'All properties in the schema must be set to "required", when using "strict" mode.',
+								name: 'requiredNotice',
+								type: 'notice',
+								default: '',
+								displayOptions: {
+									show: {
+										strict: [true],
+									},
+								},
+							},
+							{
 								displayName: 'Schema',
 								name: 'schema',
 								type: 'json',
-								default: '',
+								default: jsonSchemaExample,
 								description: 'The schema of the response format',
 								displayOptions: {
 									show: {
@@ -444,7 +479,8 @@ const properties: INodeProperties[] = [
 								name: 'strict',
 								type: 'boolean',
 								default: false,
-								description: 'Whether to enforce the response format strictly',
+								description:
+									'Whether to require that the AI will always generate responses that match the provided JSON Schema',
 								displayOptions: {
 									show: {
 										type: ['json_schema'],
@@ -547,6 +583,15 @@ export const description = updateDisplayOptions(displayOptions, properties);
 export async function execute(this: IExecuteFunctions, i: number): Promise<INodeExecutionData[]> {
 	const model = this.getNodeParameter('modelId', i, '', { extractValue: true }) as string;
 	const messages = this.getNodeParameter('responses.values', i, []) as IDataObject[];
+	const hasTextContent = messages.some(
+		(m) =>
+			(m.type === 'text' || !m.type) && typeof m.content === 'string' && m.content.trim() !== '',
+	);
+	if (!hasTextContent) {
+		throw new NodeOperationError(this.getNode(), 'A non-empty prompt is required.', {
+			itemIndex: i,
+		});
+	}
 	const options = this.getNodeParameter('options', i, {});
 	const maxToolsIterations = this.getNodeParameter('options.maxToolsIterations', i, 15) as number;
 	const builtInTools = this.getNodeParameter('builtInTools', i, {}) as IDataObject;
@@ -599,8 +644,14 @@ export async function execute(this: IExecuteFunctions, i: number): Promise<INode
 
 	if (!response) return [];
 
+	if (response.usage) {
+		accumulateTokenUsage(this, response.usage.input_tokens, response.usage.output_tokens);
+	}
+
 	// reasoning models such as gpt5 include reasoning items that must be included in the request
-	const isToolRelatedCall: (item: { type: string }) => boolean = (item) =>
+	const isToolRelatedCall = <T extends { type: string }>(
+		item: T,
+	): item is Extract<T, { type: 'function_call' | 'reasoning' }> =>
 		item.type === 'function_call' || item.type === 'reasoning';
 
 	let toolCalls = response.output.filter(isToolRelatedCall);
@@ -650,6 +701,11 @@ export async function execute(this: IExecuteFunctions, i: number): Promise<INode
 		response = (await apiRequest.call(this, 'POST', '/responses', {
 			body,
 		})) as ChatResponse;
+
+		if (response.usage) {
+			accumulateTokenUsage(this, response.usage.input_tokens, response.usage.output_tokens);
+		}
+
 		toolCalls = response.output.filter(isToolRelatedCall);
 
 		currentIteration++;

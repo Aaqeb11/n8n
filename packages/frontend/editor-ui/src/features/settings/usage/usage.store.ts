@@ -1,9 +1,9 @@
-import { computed, reactive } from 'vue';
+import { computed, reactive, ref } from 'vue';
 import { defineStore } from 'pinia';
 import type { UsageState } from '@n8n/api-types';
 import * as usageApi from '@n8n/rest-api-client/api/usage';
 import { useRootStore } from '@n8n/stores/useRootStore';
-import { useSettingsStore } from '@/stores/settings.store';
+import { useSettingsStore } from '@/app/stores/settings.store';
 
 export type UsageTelemetry = {
 	instance_id: string;
@@ -40,6 +40,7 @@ export const useUsageStore = defineStore('usage', () => {
 	const settingsStore = useSettingsStore();
 
 	const state = reactive<UsageState>({ ...DEFAULT_STATE });
+	const hasLoadedLicense = ref(false);
 
 	const planName = computed(() => state.data.license.planName || DEFAULT_PLAN_NAME);
 	const planId = computed(() => state.data.license.planId);
@@ -72,6 +73,7 @@ export const useUsageStore = defineStore('usage', () => {
 
 	const setData = (data: UsageState['data']) => {
 		state.data = data;
+		hasLoadedLicense.value = true;
 	};
 
 	const getLicenseInfo = async () => {
@@ -79,8 +81,11 @@ export const useUsageStore = defineStore('usage', () => {
 		setData(data);
 	};
 
-	const activateLicense = async (activationKey: string) => {
-		const data = await usageApi.activateLicenseKey(rootStore.restApiContext, { activationKey });
+	const activateLicense = async (activationKey: string, eulaUri?: string) => {
+		const data = await usageApi.activateLicenseKey(rootStore.restApiContext, {
+			activationKey,
+			eulaUri,
+		});
 		setData(data);
 		await settingsStore.getSettings();
 		await settingsStore.getModuleSettings();
@@ -110,6 +115,7 @@ export const useUsageStore = defineStore('usage', () => {
 		refreshLicenseManagementToken,
 		requestEnterpriseLicenseTrial,
 		registerCommunityEdition,
+		hasLoadedLicense,
 		planName,
 		planId,
 		activeWorkflowTriggersLimit,

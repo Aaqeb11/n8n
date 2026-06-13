@@ -2,9 +2,16 @@ import type { Locator } from '@playwright/test';
 
 import { BasePage } from './BasePage';
 import { LogsPanel } from './components/LogsPanel';
+import { RunDataPanel } from './components/RunDataPanel';
 
 export class ExecutionsPage extends BasePage {
+	async goto(projectId?: string) {
+		const url = projectId ? `/projects/${projectId}/executions` : '/home/executions';
+		await this.page.goto(url);
+	}
+
 	readonly logsPanel = new LogsPanel(this.getPreviewIframe().getByTestId('logs-panel'));
+	readonly outputPanel = new RunDataPanel(this.getPreviewIframe().getByTestId('output-panel'));
 
 	async clickDebugInEditorButton(): Promise<void> {
 		await this.clickButtonByName('Debug in editor');
@@ -48,6 +55,10 @@ export class ExecutionsPage extends BasePage {
 		return this.page.getByTestId('current-executions-list');
 	}
 
+	getGlobalExecutionItems(): Locator {
+		return this.page.getByTestId('global-execution-list-item');
+	}
+
 	getExecutionsSidebar(): Locator {
 		return this.page.getByTestId('executions-sidebar');
 	}
@@ -85,5 +96,45 @@ export class ExecutionsPage extends BasePage {
 	async deleteExecutionInPreview(): Promise<void> {
 		await this.page.getByTestId('execution-preview-delete-button').click();
 		await this.page.locator('button.btn--confirm').click();
+	}
+
+	// Filter methods
+	getFilterButton(): Locator {
+		return this.page.getByTestId('executions-filter-button');
+	}
+
+	getFilterForm(): Locator {
+		return this.page.getByTestId('execution-filter-form');
+	}
+
+	getStatusSelect(): Locator {
+		return this.page.getByTestId('executions-filter-status-select');
+	}
+
+	async openFilter(): Promise<void> {
+		await this.getFilterButton().click();
+	}
+
+	async openNodeExecutionDetails(name: string): Promise<void> {
+		await this.getPreviewIframe()
+			.locator(`[data-test-id="canvas-node"][data-node-name="${name}"]`)
+			.dblclick();
+	}
+
+	getFilterBadge(): Locator {
+		return this.page.getByTestId('execution-filter-badge');
+	}
+
+	getFilterResetButton(): Locator {
+		return this.page.getByTestId('executions-filter-reset-button');
+	}
+
+	async resetFilter(): Promise<void> {
+		await this.getFilterResetButton().click();
+	}
+
+	async selectFilterStatus(status: string): Promise<void> {
+		await this.getStatusSelect().getByRole('combobox').click();
+		await this.page.getByRole('option', { name: status }).click();
 	}
 }

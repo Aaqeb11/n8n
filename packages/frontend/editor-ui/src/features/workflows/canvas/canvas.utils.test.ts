@@ -7,6 +7,7 @@ import {
 	mapLegacyConnectionsToCanvasConnections,
 	mapLegacyEndpointsToCanvasConnectionPort,
 	parseCanvasConnectionHandleString,
+	resolveCanonicalConnection,
 	shouldIgnoreCanvasShortcut,
 } from './canvas.utils';
 import type { IConnection, IConnections, INodeTypeDescription } from 'n8n-workflow';
@@ -16,7 +17,7 @@ import { CanvasConnectionMode } from './canvas.types';
 import type { INodeUi } from '@/Interface';
 import type { Connection } from '@vue-flow/core';
 import { createTestNode } from '@/__tests__/mocks';
-import { NODE_MIN_INPUT_ITEMS_COUNT } from '@/constants';
+import { NODE_MIN_INPUT_ITEMS_COUNT } from '@/app/constants';
 
 vi.mock('uuid', () => ({
 	v4: vi.fn(() => 'mock-uuid'),
@@ -801,6 +802,56 @@ describe('mapCanvasConnectionToLegacyConnection', () => {
 			{ node: sourceNode.name, type: 'main', index: 1 },
 			{ node: targetNode.name, type: 'main', index: 2 },
 		]);
+	});
+});
+
+describe('resolveCanonicalConnection', () => {
+	it('should prefer canonical endpoints when present', () => {
+		const result = resolveCanonicalConnection({
+			source: 'group:g1',
+			target: 'node-b',
+			sourceHandle: 'right',
+			targetHandle: 'inputs/main/0',
+			data: {
+				source: { node: 'A', type: NodeConnectionTypes.Main, index: 0 },
+				target: { node: 'B', type: NodeConnectionTypes.Main, index: 0 },
+				canonicals: [
+					{
+						source: 'node-a',
+						target: 'node-b',
+						sourceHandle: 'outputs/main/0',
+						targetHandle: 'inputs/main/0',
+					},
+				],
+			},
+		});
+
+		expect(result).toEqual({
+			source: 'node-a',
+			target: 'node-b',
+			sourceHandle: 'outputs/main/0',
+			targetHandle: 'inputs/main/0',
+		});
+	});
+
+	it('should fall back to rendered endpoints when canonicals are absent', () => {
+		const result = resolveCanonicalConnection({
+			source: 'node-a',
+			target: 'node-b',
+			sourceHandle: 'outputs/main/0',
+			targetHandle: 'inputs/main/0',
+			data: {
+				source: { node: 'A', type: NodeConnectionTypes.Main, index: 0 },
+				target: { node: 'B', type: NodeConnectionTypes.Main, index: 0 },
+			},
+		});
+
+		expect(result).toEqual({
+			source: 'node-a',
+			target: 'node-b',
+			sourceHandle: 'outputs/main/0',
+			targetHandle: 'inputs/main/0',
+		});
 	});
 });
 

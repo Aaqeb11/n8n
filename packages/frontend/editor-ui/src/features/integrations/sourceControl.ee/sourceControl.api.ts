@@ -1,4 +1,5 @@
 import type {
+	GitCommitInfo,
 	PullWorkFolderRequestDto,
 	PushWorkFolderRequestDto,
 	SourceControlledFile,
@@ -6,13 +7,15 @@ import type {
 import type { IRestApiContext } from '@n8n/rest-api-client';
 import type {
 	SourceControlPreferences,
+	SourceControlProjectPreferences,
+	SourceControlPublicPreferences,
 	SourceControlStatus,
 	SshKeyTypes,
 } from './sourceControl.types';
 import type { IWorkflowDb } from '@/Interface';
 
 import { makeRestApiRequest } from '@n8n/rest-api-client';
-import type { TupleToUnion } from '@/utils/typeHelpers';
+import type { TupleToUnion } from '@/app/utils/typeHelpers';
 
 const sourceControlApiRoot = '/source-control';
 
@@ -27,7 +30,7 @@ const createPreferencesRequestFn =
 export const pushWorkfolder = async (
 	context: IRestApiContext,
 	data: PushWorkFolderRequestDto,
-): Promise<void> => {
+): Promise<{ files: SourceControlledFile[]; commit: GitCommitInfo | null }> => {
 	return await makeRestApiRequest(context, 'POST', `${sourceControlApiRoot}/push-workfolder`, data);
 };
 
@@ -49,7 +52,9 @@ export const updatePreferences = createPreferencesRequestFn('PATCH');
 
 export const getPreferences = async (
 	context: IRestApiContext,
-): Promise<SourceControlPreferences> => {
+): Promise<
+	SourceControlPublicPreferences | SourceControlProjectPreferences | SourceControlPreferences
+> => {
 	return await makeRestApiRequest(context, 'GET', `${sourceControlApiRoot}/preferences`);
 };
 

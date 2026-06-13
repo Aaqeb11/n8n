@@ -1,6 +1,5 @@
 import { computed, ref, shallowRef } from 'vue';
 import { defineStore } from 'pinia';
-import { useWorkflowsStore } from '@/stores/workflows.store';
 import {
 	type Dimensions,
 	type FitView,
@@ -11,11 +10,11 @@ import {
 	type ZoomTo,
 } from '@vue-flow/core';
 import { CanvasNodeRenderType, type CanvasNodeData } from '../canvas.types';
-import { usePostHog } from '@/stores/posthog.store';
-import { CANVAS_ZOOMED_VIEW_EXPERIMENT, NDV_IN_FOCUS_PANEL_EXPERIMENT } from '@/constants';
+import { usePostHog } from '@/app/stores/posthog.store';
+import { CANVAS_ZOOMED_VIEW_EXPERIMENT, NDV_IN_FOCUS_PANEL_EXPERIMENT } from '@/app/constants';
+import type { INodeUi } from '@/Interface';
 
 export const useExperimentalNdvStore = defineStore('experimentalNdv', () => {
-	const workflowStore = useWorkflowsStore();
 	const postHogStore = usePostHog();
 	const isZoomedViewEnabled = computed(
 		() =>
@@ -41,14 +40,11 @@ export const useExperimentalNdvStore = defineStore('experimentalNdv', () => {
 		};
 	}
 
-	function collapseAllNodes() {
-		collapsedNodes.value = workflowStore.allNodes.reduce<Partial<Record<string, boolean>>>(
-			(acc, node) => {
-				acc[node.id] = true;
-				return acc;
-			},
-			{},
-		);
+	function collapseAllNodes(allNodes: INodeUi[]) {
+		collapsedNodes.value = allNodes.reduce<Partial<Record<string, boolean>>>((acc, node) => {
+			acc[node.id] = true;
+			return acc;
+		}, {});
 	}
 
 	function expandAllNodes() {

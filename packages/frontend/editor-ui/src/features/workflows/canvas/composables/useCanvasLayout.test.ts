@@ -1,13 +1,17 @@
 import { useVueFlow, type GraphNode, type VueFlowStore } from '@vue-flow/core';
-import { computed, ref } from 'vue';
+import { computed, ref, shallowRef } from 'vue';
+import {
+	createEmptyCanvasRenderData,
+	type CanvasRenderData,
+} from '@/features/workflows/canvas/canvas.utils';
 import {
 	createCanvasGraphEdge,
 	createCanvasGraphNode,
 } from '@/features/workflows/canvas/__tests__/utils';
 import { CanvasNodeRenderType, type CanvasNodeData } from '../canvas.types';
 import { useCanvasLayout, type CanvasLayoutResult } from './useCanvasLayout';
-import { STICKY_NODE_TYPE } from '@/constants';
-import { GRID_SIZE } from '@/utils/nodeViewUtils';
+import { STICKY_NODE_TYPE } from '@/app/constants';
+import { GRID_SIZE } from '@/app/utils/nodeViewUtils';
 
 vi.mock('@vue-flow/core');
 
@@ -42,6 +46,7 @@ describe('useCanvasLayout', () => {
 		const { layout } = useCanvasLayout(
 			'test-canvas-id',
 			computed(() => false),
+			shallowRef<CanvasRenderData>(createEmptyCanvasRenderData()),
 		);
 
 		return { layout };
@@ -235,12 +240,6 @@ describe('useCanvasLayout', () => {
 						type: CanvasNodeRenderType.Default,
 						options: { configurable: true },
 					},
-					inputs: [
-						{ type: 'main', index: 0 },
-						{ type: 'main', index: 1 },
-						{ type: 'ai_tool', index: 0 },
-					],
-					outputs: [{ type: 'main', index: 0 }],
 				},
 				dimensions: undefined,
 			}),
@@ -251,8 +250,6 @@ describe('useCanvasLayout', () => {
 						type: CanvasNodeRenderType.Default,
 						options: { configuration: true },
 					},
-					inputs: [{ type: 'main', index: 0 }],
-					outputs: [{ type: 'main', index: 0 }],
 				},
 				dimensions: { width: 0, height: 0 },
 			}),
